@@ -89,9 +89,8 @@ When the session ends, click Launch AI Coach for audio feedback and exact geomet
 
 💻 Instructions for Developers (Building from Source)
 
-1. Clone & Install
+1. Install
 
-git clone [https://github.com/your-username/ai-self-defense-trainer.git](https://github.com/your-username/ai-self-defense-trainer.git)
 cd ai-self-defense-trainer
 pip install opencv-python mediapipe numpy customtkinter pyttsx3 Pillow auto-py-to-exe
 
