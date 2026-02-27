@@ -100,19 +100,22 @@ class MorpheusTerminal(ctk.CTk):
         cv2.destroyAllWindows()
 
     def run_tracker(self):
-        """Runs your existing live4.py script, waits for it to finish, then loads results"""
+        """Runs the live tracker, then triggers the AI Coach"""
         # 1. Delete old log to ensure fresh results
         if os.path.exists(self.mistake_log):
             os.remove(self.mistake_log)
             
-        # 2. Hide UI to simulate entering "The Matrix"
-        self.withdraw() 
+        self.withdraw() # Hide UI
         
-        # 3. RUN YOUR SCRIPT EXACTLY AS IT IS
-        print("[SYSTEM] Booting live4.py...")
-        subprocess.run(["python", "live4.py"])
+        # 2. Run the actual live.py (fixed from live4.py)
+        print("[SYSTEM] Booting live.py...")
+        subprocess.run(["python", "live.py"])
         
-        # 4. Bring UI back and show results
+        # 3. Run the AI Coach for the audio/video breakdown!
+        print("[SYSTEM] Booting AI Coach...")
+        subprocess.run(["python", "ai_coach.py"])
+        
+        # 4. Bring UI back and show the text results screen
         self.deiconify() 
         self.show_results_screen()
 
