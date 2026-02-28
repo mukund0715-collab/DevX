@@ -12,6 +12,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green") 
 
 # --- CRITICAL: ABSOLUTE PATHS ---
+# This ensures the app finds your scripts no matter where you run it from
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Folders
@@ -23,15 +24,13 @@ MISTAKES_FOLDER = os.path.join(BASE_DIR, "mistakes")
 PROFILE_FILE = os.path.join(BASE_DIR, "operator_profile.json")
 SESSION_STATS_PATH = os.path.join(BASE_DIR, "session_stats.json")
 
-# Scripts (Force absolute paths so subprocess finds them)
+# Scripts
 LIVE_SCRIPT = os.path.join(BASE_DIR, "live.py")
 COACH_SCRIPT = os.path.join(BASE_DIR, "ai_coach.py")
 
-print(f"[SYSTEM] Running from: {BASE_DIR}")
-print(f"[SYSTEM] Live Script: {LIVE_SCRIPT}")
-print(f"[SYSTEM] Coach Script: {COACH_SCRIPT}")
+print(f"[SYSTEM] App initialized at: {BASE_DIR}")
 
-# --- VIDEO PLAYER CLASS ---
+# --- VIDEO PLAYER WIDGET ---
 class VideoPlayer(ctk.CTkLabel):
     def __init__(self, master, width, height, video_path):
         super().__init__(master, text="", width=width, height=height, fg_color="black")
@@ -47,15 +46,17 @@ class VideoPlayer(ctk.CTkLabel):
         if not self.cap.isOpened(): return
         ret, frame = self.cap.read()
         if not ret:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0) # Loop video
             ret, frame = self.cap.read()
 
         if ret:
+            # Resize with Aspect Ratio (No Stretching!)
             h, w = frame.shape[:2]
             scale = min(self.target_width / w, self.target_height / h)
             new_w, new_h = int(w * scale), int(h * scale)
             frame = cv2.resize(frame, (new_w, new_h))
             
+            # Center on Black Background
             canvas = Image.new("RGB", (self.target_width, self.target_height), (0, 0, 0))
             paste_x, paste_y = (self.target_width - new_w) // 2, (self.target_height - new_h) // 2
             frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -69,8 +70,11 @@ class VideoPlayer(ctk.CTkLabel):
             self.after_id = self.after(33, self.update_frame)
 
     def seek(self, frame_index):
+        """Jump to specific frame and pause"""
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_index))
-        if not self.is_playing: self.play()
+        self.is_playing = True
+        self.update_frame()
+        # Optional: Auto-pause after 2 seconds could go here
 
     def play(self):
         self.is_playing = True
@@ -81,11 +85,11 @@ class VideoPlayer(ctk.CTkLabel):
         if self.after_id: self.after_cancel(self.after_id)
         self.cap.release()
 
-# --- MAIN APP ---
+# --- MAIN APPLICATION ---
 class MorpheusTerminal(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("PROJECT MORPHEUS // WOMEN'S SELF-DEFENSE INITIATIVE")
+        self.title("PROJECT MORPHEUS // SELF-DEFENSE INITIATIVE")
         self.geometry("1200x800")
         
         self.bg_image = None
@@ -110,7 +114,7 @@ class MorpheusTerminal(ctk.CTk):
                 if isinstance(child, VideoPlayer): child.stop()
             self.current_frame.destroy()
 
-    # --- SCREEN 1: LOGIN ---
+    # --- 1. LOGIN ---
     def show_login_screen(self):
         self.clear_screen()
         frame = ctk.CTkFrame(self.container, fg_color="black")
@@ -139,13 +143,12 @@ class MorpheusTerminal(ctk.CTk):
                     data = json.load(f)
                     if data.get("alias") == alias: 
                         profile.update(data)
-                        if "xp" not in profile: profile["xp"] = 0
             except: pass
         
         with open(PROFILE_FILE, "w") as f: json.dump(profile, f)
         self.show_home_screen(profile)
 
-    # --- SCREEN 2: DASHBOARD ---
+    # --- 2. DASHBOARD ---
     def show_home_screen(self, profile):
         self.clear_screen()
         frame = ctk.CTkFrame(self.container, fg_color="#101010")
@@ -165,7 +168,7 @@ class MorpheusTerminal(ctk.CTk):
         ctk.CTkButton(frame, text="OPEN DEFENSE SCENARIOS >>", font=("Courier", 20, "bold"), height=60,
                       fg_color="#00FF41", text_color="black", command=lambda: self.show_training_hub(profile)).place(relx=0.5, rely=0.5, anchor="center")
 
-    # --- SCREEN 3: HUB ---
+    # --- 3. SCENARIO HUB ---
     def show_training_hub(self, profile):
         self.clear_screen()
         frame = ctk.CTkFrame(self.container, fg_color="#101010")
@@ -209,7 +212,7 @@ class MorpheusTerminal(ctk.CTk):
         ctk.CTkButton(card, text="TRAIN", font=("Courier", 14, "bold"), width=150, fg_color=color, text_color="black",
                       state=state, command=lambda: self.show_briefing_room(profile, name, angles)).pack(side="right", padx=30)
 
-    # --- SCREEN 4: BRIEFING ---
+    # --- 4. BRIEFING ROOM ---
     def show_briefing_room(self, profile, move_name, angles):
         self.clear_screen()
         frame = ctk.CTkFrame(self.container, fg_color="#101010")
@@ -270,21 +273,13 @@ class MorpheusTerminal(ctk.CTk):
         self.start_btn.pack(side="bottom", pady=40, padx=20, fill="x")
         switch_angle(human_angles[0])
 
-    # --- ACTION: RUN TRACKER ---
-    # ==========================================
-    # ACTION: RUN TRACKER (ROBUST VERSION)
-    # ==========================================
-    # ==========================================
-    # ACTION: RUN TRACKER (ROBUST)
-    # ==========================================
+    # --- 5. ACTION: RUN TRACKER ---
     def run_tracker(self, profile, video_file, json_path):
         if self.player: self.player.stop()
         self.withdraw()
         
-        # 1. Setup Paths
         if not os.path.exists(MISTAKES_FOLDER): os.makedirs(MISTAKES_FOLDER)
         
-        # We define a 'target' name, but we will accept ANY new file created
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         target_log = os.path.join(MISTAKES_FOLDER, f"log_{timestamp}.json")
         
@@ -292,20 +287,17 @@ class MorpheusTerminal(ctk.CTk):
         print(f"[APP] Target Log: {target_log}")
 
         try:
-            # 2. Run Scripts
-            # Pass the target log path explicitly
+            # Run Live Tracker (Pass the target log path)
             subprocess.run([sys.executable, LIVE_SCRIPT, json_path, target_log], check=False)
             
-            # Run Coach on that specific log
+            # Run AI Coach
             if os.path.exists(target_log):
                 print("[APP] Log found. Running Coach...")
                 subprocess.run([sys.executable, COACH_SCRIPT, target_log], check=False)
             else:
-                # If the specific file wasn't found, try running coach on the folder generally? 
-                # No, let's just let the results screen find the newest file.
-                print("[APP] Target log not found immediately. Proceeding to discovery mode.")
+                print("[APP] Target log not found immediately. Proceeding to discovery.")
 
-            # 3. Update XP (Safe Mode)
+            # Update XP
             if os.path.exists(SESSION_STATS_PATH):
                 with open(SESSION_STATS_PATH, 'r') as f:
                     stats = json.load(f)
@@ -319,19 +311,16 @@ class MorpheusTerminal(ctk.CTk):
             print(f"[APP] Process Error: {e}")
 
         self.deiconify()
-        # We don't pass a hardcoded path anymore. We let the next screen find the freshest data.
+        # Find newest analysis file automatically
         self.show_results_screen(profile, video_file)
-    # --- SCREEN 5: RESULTS ---
-    # ==========================================
-    # SCREEN 5: RESULTS (AUTO-DISCOVERY)
-    # ==========================================
+
+    # --- 6. RESULTS (AUTO-DISCOVERY) ---
     def show_results_screen(self, profile, video_file):
         self.clear_screen()
         frame = ctk.CTkFrame(self.container, fg_color="#050505")
         self.current_frame = frame
         frame.pack(fill="both", expand=True)
 
-        # Header
         header = ctk.CTkFrame(frame, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=20)
         ctk.CTkLabel(header, text="A.I. COACH FEEDBACK", font=("Courier", 30, "bold"), text_color="#00FF41").pack(side="left")
@@ -352,17 +341,14 @@ class MorpheusTerminal(ctk.CTk):
         review_player.pack(expand=True)
         
         # --- AUTO-DISCOVERY LOGIC ---
-        # Find the most recent _analysis.json file in the mistakes folder
         analysis_path = None
         if os.path.exists(MISTAKES_FOLDER):
             files = [os.path.join(MISTAKES_FOLDER, f) for f in os.listdir(MISTAKES_FOLDER) if f.endswith("_analysis.json")]
             if files:
-                # Sort by modification time (newest first)
                 newest_file = max(files, key=os.path.getmtime)
                 print(f"[APP] Loaded Analysis: {newest_file}")
                 analysis_path = newest_file
 
-        # LOAD DATA
         if analysis_path and os.path.exists(analysis_path):
             try:
                 with open(analysis_path, 'r') as f:
@@ -377,7 +363,6 @@ class MorpheusTerminal(ctk.CTk):
                 ctk.CTkLabel(left_scroll, text=f"FILE ERROR: {e}", text_color="red").pack(pady=20)
         else:
              ctk.CTkLabel(left_scroll, text="NO RECENT ANALYSIS FOUND.", text_color="red", font=("Courier", 16)).pack(pady=20)
-             ctk.CTkLabel(left_scroll, text=f"Checked folder:\n{MISTAKES_FOLDER}", text_color="gray", font=("Arial", 10)).pack(pady=5)
 
     def create_mistake_card(self, parent, mistake, player):
         card = ctk.CTkFrame(parent, fg_color="#111111", border_width=1, border_color="#333333")
