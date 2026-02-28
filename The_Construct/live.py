@@ -3,35 +3,46 @@ import json
 import mediapipe as mp
 import numpy as np
 import time
+import sys
+import os
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-# --- CONFIGURATION ---
-JSON_PATH = '3d.json'
+# --- ARGUMENT HANDLING ---
+if len(sys.argv) > 1:
+    JSON_PATH = sys.argv[1]
+else:
+    JSON_PATH = 'sck/punches_c_coords.json' 
+
+if len(sys.argv) > 2:
+    ERROR_LOG_PATH = sys.argv[2]
+else:
+    if not os.path.exists("mistakes"): os.makedirs("mistakes")
+    ERROR_LOG_PATH = 'mistakes/debug_session.json'
+
+print(f"[LIVE] Saving mistakes to: {ERROR_LOG_PATH}")
+os.makedirs(os.path.dirname(ERROR_LOG_PATH), exist_ok=True)
+
 MODEL_PATH = 'pose_landmarker_heavy.task'
-ERROR_LOG_PATH = 'stuck_coordinates_log.json' 
-STUCK_TIMEOUT = 2.5  
+STUCK_TIMEOUT = 2.5 
 VIS_THRESHOLD = 0.5 
 
 WEIGHTS = {
-    'head_neck': 0.05, 
-    'shoulders': 0.10,
-    'elbows': 0.10,
-    'wrists_hands': 0.15,
-    'torso_hips': 0.15, 
-    'knees': 0.20, 
-    'ankles_feet': 0.25
+    'head_neck': 0.05, 'shoulders': 0.10, 'elbows': 0.10,
+    'wrists_hands': 0.15, 'torso_hips': 0.20, 'knees': 0.20, 'ankles_feet': 0.20
 }
 
 GROUPS = {
-    'head_neck': [0, 7, 8],
-    'shoulders': [11, 12],
-    'elbows': [13, 14],
-    'wrists_hands': [15, 16, 17, 18, 19, 20, 21, 22],
-    'torso_hips': [23, 24],
-    'knees': [25, 26],
-    'ankles_feet': [27, 28, 29, 30, 31, 32]
+    'head_neck': [0, 7, 8], 'shoulders': [11, 12], 'elbows': [13, 14],
+    'wrists_hands': [15, 16, 17, 18, 19, 20, 21, 22], 'torso_hips': [23, 24],
+    'knees': [25, 26], 'ankles_feet': [27, 28, 29, 30, 31, 32]
 }
+
+CONNECTIONS = [
+    (11, 12), (12, 24), (24, 23), (23, 11), 
+    (11, 13), (13, 15), (12, 14), (14, 16), 
+    (23, 25), (25, 27), (24, 26), (26, 28)  
+]
 
 def get_full_body_features(landmarks, is_json=False):
     points = np.array([[l['x'], l['y']] if is_json else [l.x, l.y] for l in landmarks])
@@ -39,124 +50,164 @@ def get_full_body_features(landmarks, is_json=False):
     return points - hip_center
 
 def evaluate_groups(curr_full, curr_rel, targ_rel):
-    group_scores = {}
     total_weighted_score = 0
     total_weight_used = 0
     
     for group, indices in GROUPS.items():
         visible_indices = [i for i in indices if curr_full[i].visibility > VIS_THRESHOLD]
         if len(visible_indices) < 2: 
-            group_scores[group] = 100 
             continue 
             
         v1, v2 = curr_rel[visible_indices].flatten(), targ_rel[visible_indices].flatten()
         norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
         sim = (np.dot(v1, v2) / (norm1 * norm2)) * 100 if (norm1 * norm2) != 0 else 0
         
-        group_scores[group] = sim
         total_weighted_score += sim * WEIGHTS[group]
         total_weight_used += WEIGHTS[group]
         
-    final = (total_weighted_score / total_weight_used) if total_weight_used > 0 else 0
-    return final, group_scores
+    return (total_weighted_score / total_weight_used) if total_weight_used > 0 else 0
 
 # --- MAIN ---
-with open(JSON_PATH, 'r') as f:
-    target_data = json.load(f)
+try:
+    with open(JSON_PATH, 'r') as f:
+        data = json.load(f)
+        target_data = data['coordinates'] if 'coordinates' in data else data
+except FileNotFoundError:
+    print(f"Error: Could not find {JSON_PATH}")
+    sys.exit()
+
 target_features = [get_full_body_features(f['landmarks'], True) for f in target_data]
 
 base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
 options = vision.PoseLandmarkerOptions(base_options=base_options, running_mode=vision.RunningMode.VIDEO)
 
 error_log = [] 
+total_score_accumulated = 0
+frames_tracked = 0
+
+cap_live = cv2.VideoCapture(0)
+
+WINDOW_NAME = 'PROJECT MORPHEUS // LIVE LINK'
+cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
 with vision.PoseLandmarker.create_from_options(options) as landmarker:
-    cap = cv2.VideoCapture(0)
     current_target_idx = 0
     last_advance_time = time.time()
 
-    while cap.isOpened():
-        success, frame = cap.read()
-        if not success: break
+    while cap_live.isOpened():
+        ret_l, frame = cap_live.read()
+        if not ret_l: break
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
-        
+
+        # --- DRAW MINI-GHOST (Thinner & Taller) ---
+        if current_target_idx < len(target_data):
+            # 1. Define Portrait Box (9:16 Strict)
+            # Make it narrower (w // 8) to prevent stretching
+            pip_w = w // 8
+            pip_h = int(pip_w * (16/9)) 
+            pip_x = 30
+            pip_y = 30
+            
+            # Draw Background
+            cv2.rectangle(frame, (pip_x, pip_y), (pip_x + pip_w, pip_y + pip_h), (0, 0, 0), -1)
+            cv2.rectangle(frame, (pip_x, pip_y), (pip_x + pip_w, pip_y + pip_h), (0, 255, 65), 1) # Thinner border
+
+            # Draw Skeleton
+            ghost_lms = target_data[current_target_idx]['landmarks']
+            for start, end in CONNECTIONS:
+                # Map coordinates
+                p1_x = int(ghost_lms[start]['x'] * pip_w) + pip_x
+                p1_y = int(ghost_lms[start]['y'] * pip_h) + pip_y
+                p2_x = int(ghost_lms[end]['x'] * pip_w) + pip_x
+                p2_y = int(ghost_lms[end]['y'] * pip_h) + pip_y
+                
+                # Clip to box
+                if (pip_x <= p1_x <= pip_x + pip_w) and (pip_y <= p1_y <= pip_y + pip_h):
+                    # THICKNESS = 1 (Very Thin)
+                    cv2.line(frame, (p1_x, p1_y), (p2_x, p2_y), (0, 255, 65), 1) 
+
+            # Tiny Label
+            cv2.putText(frame, "GUIDE", (pip_x + 5, pip_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 65), 1)
+
+        # --- TRACKING LOGIC ---
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         result = landmarker.detect_for_video(mp_image, int(time.time() * 1000))
 
+        best_score = 0 
         if result.pose_landmarks:
             curr_full = result.pose_landmarks[0]
             curr_rel = get_full_body_features(curr_full)
 
-            best_score, best_idx, best_group_breakdown = 0, current_target_idx, {}
-            start_s = max(0, current_target_idx - 15)
-            end_s = min(len(target_data), current_target_idx + 15)
+            best_idx = current_target_idx
+            start_s = max(0, current_target_idx - 10)
+            end_s = min(len(target_data), current_target_idx + 10)
 
             for i in range(start_s, end_s):
-                score, breakdown = evaluate_groups(curr_full, curr_rel, target_features[i])
+                score = evaluate_groups(curr_full, curr_rel, target_features[i])
                 if score > best_score:
-                    best_score, best_idx, best_group_breakdown = score, i, breakdown
+                    best_score, best_idx = score, i
 
-            # --- ADVANCE OR LOG MISTAKES ---
             if best_idx > current_target_idx:
                 current_target_idx = best_idx
                 last_advance_time = time.time()
+                total_score_accumulated += best_score
+                frames_tracked += 1
             else:
                 time_stuck = time.time() - last_advance_time
                 if time_stuck > STUCK_TIMEOUT:
-                    
-                    # --- THE FIX: FIND THE BIGGEST PHYSICAL GAP ---
-                    max_error_distance = -1
-                    worst_group = "torso_hips" # Fallback
-                    worst_landmark_idx = 24    # Fallback
                     targ_rel = target_features[current_target_idx]
                     
-                    # We check EVERY group, not just the one with the lowest angle score
+                    max_error_distance = -1
+                    worst_group = "torso_hips"
+                    worst_landmark_idx = 24
+                    
                     for group, indices in GROUPS.items():
                         for joint_idx in indices:
                             if curr_full[joint_idx].visibility > VIS_THRESHOLD:
-                                # Calculate actual physical distance between your joint and target joint
                                 dist = np.linalg.norm(curr_rel[joint_idx] - targ_rel[joint_idx])
                                 if dist > max_error_distance:
                                     max_error_distance = dist
                                     worst_group = group
                                     worst_landmark_idx = joint_idx
                     
-                    # Get the EXACT target coordinates from the ghost
-                    targ_landmarks = target_data[current_target_idx]['landmarks']
-                                
                     error_log.append({
                         "frame_index": current_target_idx,
                         "timestamp": time.strftime("%H:%M:%S"),
-                        "failed_group": worst_group,
                         "failed_joint_id": int(worst_landmark_idx),
-                        "wrong_x": round(float(curr_rel[worst_landmark_idx][0]), 4),
-                        "right_x": round(float(targ_rel[worst_landmark_idx][0]), 4),
-                        "wrong_y": round(float(curr_rel[worst_landmark_idx][1]), 4),
-                        "right_y": round(float(targ_rel[worst_landmark_idx][1]), 4),
-                        "score_at_fail": round(best_score, 2)
+                        "failed_group": worst_group,
+                        "wrong_x": float(curr_rel[worst_landmark_idx][0]),
+                        "right_x": float(targ_rel[worst_landmark_idx][0]),
+                        "wrong_y": float(curr_rel[worst_landmark_idx][1]),
+                        "right_y": float(targ_rel[worst_landmark_idx][1]),
+                        "score_at_fail": int(best_score)
                     })
                     
-                    current_target_idx = min(len(target_data)-1, current_target_idx + 15)
+                    current_target_idx = min(len(target_data)-1, current_target_idx + 20)
                     last_advance_time = time.time()
 
-            # --- VISUALS ---
-            ghost_lms = target_data[current_target_idx]['landmarks']
-            for start, end in [(11,12), (12,24), (24,23), (23,11), (11,13), (13,15), (12,14), (14,16), (23,25), (25,27), (24,26), (26,28)]:
-                p1 = (int(ghost_lms[start]['x'] * w), int(ghost_lms[start]['y'] * h))
-                p2 = (int(ghost_lms[end]['x'] * w), int(ghost_lms[end]['y'] * h))
-                cv2.line(frame, p1, p2, (255, 255, 0), 2)
+        # --- TINY SCORE (Bottom Left) ---
+        color = (0, 255, 0) if best_score > 80 else (0, 0, 255)
+        # Font Scale: 0.6 (Tiny), Thickness: 1
+        cv2.putText(frame, f"SCORE: {int(best_score)}%", (20, h - 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
 
-            cv2.putText(frame, f"MATCH: {int(best_score)}%", (20, h-30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.imshow('Tracking Data', frame)
+        cv2.imshow(WINDOW_NAME, frame)
+        
+        if current_target_idx >= len(target_data) - 5: break
+        if cv2.waitKey(1) & 0xFF == ord('q'): break
 
-        if current_target_idx >= len(target_data) - 1 or cv2.waitKey(1) & 0xFF == ord('q'): break
-
-cap.release()
+cap_live.release()
 cv2.destroyAllWindows()
 
-# --- SAVE TO ONLY ONE JSON FILE ---
+# Save Logs
 with open(ERROR_LOG_PATH, 'w') as f:
     json.dump(error_log, f, indent=2)
 
-print(f"Logged {len(error_log)} detailed incidents to {ERROR_LOG_PATH}")
+# Save Stats
+avg = (total_score_accumulated / frames_tracked) if frames_tracked > 0 else 0
+xp = int(avg * 0.5) + (len(target_data) // 10)
+
+with open('session_stats.json', 'w') as f:
+    json.dump({"xp_gained": xp, "avg_accuracy": round(avg, 1)}, f)
