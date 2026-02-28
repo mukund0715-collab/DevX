@@ -8,6 +8,10 @@ import os
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
+# --- CONFIGURATION ---
+TARGET_WIDTH = 1280
+TARGET_HEIGHT = 720
+
 # --- ARGUMENT HANDLING ---
 if len(sys.argv) > 1:
     JSON_PATH = sys.argv[1]
@@ -20,13 +24,13 @@ else:
     if not os.path.exists("mistakes"): os.makedirs("mistakes")
     ERROR_LOG_PATH = 'mistakes/debug_session.json'
 
-print(f"[LIVE] Saving mistakes to: {ERROR_LOG_PATH}")
 os.makedirs(os.path.dirname(ERROR_LOG_PATH), exist_ok=True)
 
 MODEL_PATH = 'pose_landmarker_heavy.task'
 STUCK_TIMEOUT = 2.5 
 VIS_THRESHOLD = 0.5 
 
+# Weights & Groups
 WEIGHTS = {
     'head_neck': 0.05, 'shoulders': 0.10, 'elbows': 0.10,
     'wrists_hands': 0.15, 'torso_hips': 0.20, 'knees': 0.20, 'ankles_feet': 0.20
@@ -52,20 +56,29 @@ def get_full_body_features(landmarks, is_json=False):
 def evaluate_groups(curr_full, curr_rel, targ_rel):
     total_weighted_score = 0
     total_weight_used = 0
-    
     for group, indices in GROUPS.items():
         visible_indices = [i for i in indices if curr_full[i].visibility > VIS_THRESHOLD]
-        if len(visible_indices) < 2: 
-            continue 
-            
+        if len(visible_indices) < 2: continue 
         v1, v2 = curr_rel[visible_indices].flatten(), targ_rel[visible_indices].flatten()
         norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
         sim = (np.dot(v1, v2) / (norm1 * norm2)) * 100 if (norm1 * norm2) != 0 else 0
-        
         total_weighted_score += sim * WEIGHTS[group]
         total_weight_used += WEIGHTS[group]
-        
     return (total_weighted_score / total_weight_used) if total_weight_used > 0 else 0
+
+def resize_and_pad(image, target_w, target_h):
+    h, w = image.shape[:2]
+    scale = min(target_w / w, target_h / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    
+    resized = cv2.resize(image, (new_w, new_h))
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    
+    x_offset = (target_w - new_w) // 2
+    y_offset = (target_h - new_h) // 2
+    canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
+    
+    return canvas, x_offset, y_offset, scale
 
 # --- MAIN ---
 try:
@@ -73,7 +86,6 @@ try:
         data = json.load(f)
         target_data = data['coordinates'] if 'coordinates' in data else data
 except FileNotFoundError:
-    print(f"Error: Could not find {JSON_PATH}")
     sys.exit()
 
 target_features = [get_full_body_features(f['landmarks'], True) for f in target_data]
@@ -85,53 +97,67 @@ error_log = []
 total_score_accumulated = 0
 frames_tracked = 0
 
-cap_live = cv2.VideoCapture(0)
+# --- ROBUST CAMERA INITIALIZATION ---
+print("[LIVE] Initializing Camera...")
+cap_live = cv2.VideoCapture(0, cv2.CAP_DSHOW) # Try DirectShow (Index 0)
+
+if not cap_live.isOpened():
+    print("[LIVE] Camera 0 failed. Trying Camera 1...")
+    cap_live = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+
+if not cap_live.isOpened():
+    print("[LIVE] CRITICAL ERROR: No Camera Found.")
+    # Create a dummy black frame so it doesn't crash, just shows black
+    # This allows you to debug without hardware
+    class DummyCap:
+        def isOpened(self): return True
+        def read(self): return True, np.zeros((720, 1280, 3), dtype=np.uint8)
+        def release(self): pass
+        def set(self, prop, val): pass
+    cap_live = DummyCap()
+
+# Set Resolution
+cap_live.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap_live.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
 WINDOW_NAME = 'PROJECT MORPHEUS // LIVE LINK'
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+cv2.resizeWindow(WINDOW_NAME, TARGET_WIDTH, TARGET_HEIGHT)
 
 with vision.PoseLandmarker.create_from_options(options) as landmarker:
     current_target_idx = 0
     last_advance_time = time.time()
 
     while cap_live.isOpened():
-        ret_l, frame = cap_live.read()
+        ret_l, raw_frame = cap_live.read()
         if not ret_l: break
-        frame = cv2.flip(frame, 1)
+        
+        raw_frame = cv2.flip(raw_frame, 1)
+        frame, offset_x, offset_y, scale = resize_and_pad(raw_frame, TARGET_WIDTH, TARGET_HEIGHT)
         h, w, _ = frame.shape
 
-        # --- DRAW MINI-GHOST (Thinner & Taller) ---
+        # Mini-Map (Portrait)
         if current_target_idx < len(target_data):
-            # 1. Define Portrait Box (9:16 Strict)
-            # Make it narrower (w // 8) to prevent stretching
             pip_w = w // 8
             pip_h = int(pip_w * (16/9)) 
             pip_x = 30
             pip_y = 30
             
-            # Draw Background
             cv2.rectangle(frame, (pip_x, pip_y), (pip_x + pip_w, pip_y + pip_h), (0, 0, 0), -1)
-            cv2.rectangle(frame, (pip_x, pip_y), (pip_x + pip_w, pip_y + pip_h), (0, 255, 65), 1) # Thinner border
+            cv2.rectangle(frame, (pip_x, pip_y), (pip_x + pip_w, pip_y + pip_h), (0, 255, 65), 1)
 
-            # Draw Skeleton
             ghost_lms = target_data[current_target_idx]['landmarks']
             for start, end in CONNECTIONS:
-                # Map coordinates
                 p1_x = int(ghost_lms[start]['x'] * pip_w) + pip_x
                 p1_y = int(ghost_lms[start]['y'] * pip_h) + pip_y
                 p2_x = int(ghost_lms[end]['x'] * pip_w) + pip_x
                 p2_y = int(ghost_lms[end]['y'] * pip_h) + pip_y
                 
-                # Clip to box
                 if (pip_x <= p1_x <= pip_x + pip_w) and (pip_y <= p1_y <= pip_y + pip_h):
-                    # THICKNESS = 1 (Very Thin)
                     cv2.line(frame, (p1_x, p1_y), (p2_x, p2_y), (0, 255, 65), 1) 
-
-            # Tiny Label
             cv2.putText(frame, "GUIDE", (pip_x + 5, pip_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 65), 1)
 
-        # --- TRACKING LOGIC ---
+        # Tracking
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         result = landmarker.detect_for_video(mp_image, int(time.time() * 1000))
 
@@ -187,9 +213,7 @@ with vision.PoseLandmarker.create_from_options(options) as landmarker:
                     current_target_idx = min(len(target_data)-1, current_target_idx + 20)
                     last_advance_time = time.time()
 
-        # --- TINY SCORE (Bottom Left) ---
         color = (0, 255, 0) if best_score > 80 else (0, 0, 255)
-        # Font Scale: 0.6 (Tiny), Thickness: 1
         cv2.putText(frame, f"SCORE: {int(best_score)}%", (20, h - 20), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
 
